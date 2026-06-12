@@ -1,23 +1,28 @@
 """
-RAG Básico con ChromaDB persistente — Interfaz Streamlit (tema blanco · chatbot)
-Replica el pipeline del notebook notebooks/04_rag/01_basic_rag.ipynb
+RAG con ChromaDB persistente + memoria conversacional — Interfaz Streamlit
+Índice: data/vector_db_2 (mundiales de fútbol). Memoria: notebooks/04_rag/03_rag_memory.ipynb
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 import warnings
 import datetime
-import requests
+
+# Evitar que transformers/sentence-transformers exijan PyTorch (usamos Ollama)
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+logging.getLogger("transformers").setLevel(logging.CRITICAL)
+
 import streamlit as st
 
 warnings.filterwarnings("ignore")
 
 # ── Configuración de página ─────────────────────────────────────────────────
 st.set_page_config(
-    page_title="RAG Assistant · ML Papers",
-    page_icon="💬",
+    page_title="RAG Assistant · Mundiales",
+    page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -207,17 +212,10 @@ footer {
 """, unsafe_allow_html=True)
 
 # ── Constantes ──────────────────────────────────────────────────────────────
-BASE_DIR   = str(Path(__file__).resolve().parents[2])
-PDF_DIR    = os.path.join(BASE_DIR, "data", "Papers")
-VECTOR_DIR = os.path.join(BASE_DIR, "data", "vector_db")
-
-PAPER_URLS = [
-    "https://arxiv.org/pdf/2306.06031v1.pdf",
-    "https://arxiv.org/pdf/2306.12156v1.pdf",
-    "https://arxiv.org/pdf/2306.14289v1.pdf",
-    "https://arxiv.org/pdf/2305.10973v1.pdf",
-    "https://arxiv.org/pdf/2306.13643v1.pdf",
-]
+BASE_DIR = str(Path(__file__).resolve().parents[2])
+FOOTBALL_DIR = os.path.join(BASE_DIR, "data", "Football")
+VECTOR_DIR = os.path.join(BASE_DIR, "data", "vector_db_2")
+COLLECTION_NAME = "mundiales_football"
 
 # Modelo de embeddings fijo
 EMB_MODEL = "nomic-embed-text:latest"
@@ -225,10 +223,21 @@ EMB_MODEL = "nomic-embed-text:latest"
 # Modelos LLM disponibles
 LLM_MODELS = ["qwen2.5:1.5b", "llama3.2:3b", "llama3.2:latest", "llama3.2:1b"]
 
+MEMORY_OPTIONS = {
+    "Ventana (k=4) — últimas interacciones": "window",
+    "Buffer — historial completo": "buffer",
+    "Resumen — resumen progresivo con LLM": "summary",
+    "Resumen + Buffer — recientes + resumen": "summary_buffer",
+}
+DEFAULT_MEMORY_LABEL = "Ventana (k=4) — últimas interacciones"
+
 # ── Estado de sesión ────────────────────────────────────────────────────────
 for key, default in {
     "messages": [],
-    "chain": None,
+    "qa": None,
+    "memory": None,
+    "memory_type": None,
+    "rag_config": None,
     "vectorstore": None,
     "retriever": None,
     "last_retrieved_chunks": [],
@@ -239,14 +248,58 @@ for key, default in {
 
 
 # ── Helpers de backend ──────────────────────────────────────────────────────
-def download_papers():
-    os.makedirs(PDF_DIR, exist_ok=True)
-    for i, url in enumerate(PAPER_URLS):
-        fname = os.path.join(PDF_DIR, f"paper{i+1}.pdf")
-        if not os.path.exists(fname):
-            r = requests.get(url, timeout=60)
-            with open(fname, "wb") as f:
-                f.write(r.content)
+def split_documents_simple(pages, chunk_size: int = 1500, overlap: int = 200):
+    """Divide páginas sin langchain_text_splitters (evita dependencia de torch)."""
+    from langchain_core.documents import Document
+
+    chunks: list[Document] = []
+    for page in pages:
+        text = page.page_content
+        if not text:
+            continue
+        start = 0
+        while start < len(text):
+            end = min(start + chunk_size, len(text))
+            chunks.append(
+                Document(page_content=text[start:end], metadata=dict(page.metadata))
+            )
+            if end >= len(text):
+                break
+            start = max(end - overlap, start + 1)
+    return chunks
+
+
+def find_football_pdf() -> str | None:
+    """Localiza el PDF de mundiales en data/Football/."""
+    football = Path(FOOTBALL_DIR)
+    if not football.is_dir():
+        return None
+    pdfs = sorted(football.glob("*.pdf"))
+    return str(pdfs[0]) if pdfs else None
+
+
+def create_memory(memory_type: str, llm):
+    from langchain_classic.memory import (
+        ConversationBufferMemory,
+        ConversationBufferWindowMemory,
+        ConversationSummaryBufferMemory,
+        ConversationSummaryMemory,
+    )
+
+    common = {
+        "memory_key": "chat_history",
+        "return_messages": True,
+        "output_key": "answer",
+    }
+    if memory_type == "buffer":
+        return ConversationBufferMemory(**common)
+    if memory_type == "window":
+        return ConversationBufferWindowMemory(k=4, **common)
+    if memory_type == "summary":
+        return ConversationSummaryMemory(llm=llm, **common)
+    if memory_type == "summary_buffer":
+        return ConversationSummaryBufferMemory(llm=llm, max_token_limit=500, **common)
+    return ConversationBufferWindowMemory(k=4, **common)
 
 
 def get_existing_embedding_dim() -> int | None:
@@ -254,7 +307,7 @@ def get_existing_embedding_dim() -> int | None:
     try:
         import chromadb
         client = chromadb.PersistentClient(path=VECTOR_DIR)
-        col  = client.get_collection("ml_papers")
+        col = client.get_collection(COLLECTION_NAME)
         peek = col.peek(limit=1)
         if peek and peek.get("embeddings") and peek["embeddings"]:
             return len(peek["embeddings"][0])
@@ -269,7 +322,7 @@ def wipe_vector_db():
     if os.path.exists(VECTOR_DIR):
         shutil.rmtree(VECTOR_DIR)
     os.makedirs(VECTOR_DIR, exist_ok=True)
-    build_rag_chain.clear()   # invalida el cache_resource
+    load_vectorstore.clear()  # invalida el cache_resource
 
 
 def _chunk_dict(doc, score: float | None = None) -> dict:
@@ -331,68 +384,104 @@ def render_retrieved_chunks(chunks: list[dict], turn_id: int) -> None:
 
 
 @st.cache_resource(show_spinner=False)
-def build_rag_chain(emb_model: str, llm_model: str, top_k: int, temperature: float):
-    from langchain_community.document_loaders import PyPDFLoader
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
+def load_vectorstore(emb_model: str, top_k: int):
     from langchain_community.vectorstores import Chroma
-    from langchain_ollama import OllamaEmbeddings, ChatOllama
-    from langchain_core.prompts import PromptTemplate
-    from langchain_core.runnables import RunnableLambda
-    from langchain_core.output_parsers import StrOutputParser
+    from langchain_ollama import OllamaEmbeddings
 
-    os.makedirs(PDF_DIR, exist_ok=True)
     os.makedirs(VECTOR_DIR, exist_ok=True)
-
     embeddings = OllamaEmbeddings(model=emb_model)
 
-    if os.path.exists(VECTOR_DIR) and os.listdir(VECTOR_DIR):
+    chroma_files = [
+        p for p in Path(VECTOR_DIR).iterdir()
+        if p.name != "README.md"
+    ] if Path(VECTOR_DIR).exists() else []
+
+    if chroma_files:
         vectorstore = Chroma(
             persist_directory=VECTOR_DIR,
             embedding_function=embeddings,
-            collection_name="ml_papers",
+            collection_name=COLLECTION_NAME,
         )
     else:
-        download_papers()
-        ml_papers = []
-        for i in range(len(PAPER_URLS)):
-            loader = PyPDFLoader(os.path.join(PDF_DIR, f"paper{i+1}.pdf"))
-            ml_papers.extend(loader.load())
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
-        docs = splitter.split_documents(ml_papers)
+        from langchain_community.document_loaders import PyPDFLoader
+
+        pdf_path = find_football_pdf()
+        if not pdf_path:
+            raise FileNotFoundError(
+                "No hay índice en data/vector_db_2 ni PDF en data/Football/. "
+                "Ejecuta notebooks/03_embeddings/03_vector_db_football.ipynb"
+            )
+        pages = PyPDFLoader(pdf_path).load()
+        docs = split_documents_simple(pages)
         vectorstore = Chroma.from_documents(
             documents=docs,
             embedding=embeddings,
             persist_directory=VECTOR_DIR,
-            collection_name="ml_papers",
+            collection_name=COLLECTION_NAME,
         )
 
     retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
+    return vectorstore, retriever
+
+
+def build_conversational_chain(
+    llm_model: str,
+    top_k: int,
+    temperature: float,
+    memory_type: str,
+    memory,
+):
+    from langchain_classic.chains import ConversationalRetrievalChain
+    from langchain_core._api.deprecation import suppress_langchain_deprecation_warning
+    from langchain_ollama import ChatOllama
+
+    vectorstore, retriever = load_vectorstore(EMB_MODEL, top_k)
     llm = ChatOllama(model=llm_model, temperature=temperature)
 
-    prompt = PromptTemplate.from_template("""
-Eres un asistente experto en inteligencia artificial y aprendizaje automático.
-Responde SIEMPRE en español, de forma clara y detallada, usando el contexto proporcionado.
-Si el contexto no contiene suficiente información para responder, indícalo con amabilidad.
+    with suppress_langchain_deprecation_warning():
+        qa = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=retriever,
+            memory=memory,
+            return_source_documents=True,
+        )
+    return qa, vectorstore, retriever
 
-Contexto:
-{context}
 
-Pregunta:
-{question}
+def ensure_rag_session(
+    llm_model: str,
+    top_k: int,
+    temperature: float,
+    memory_label: str,
+):
+    memory_type = MEMORY_OPTIONS[memory_label]
+    rag_config = (llm_model, top_k, temperature, memory_type)
 
-Respuesta en español:""")
+    if st.session_state.memory_type != memory_type:
+        from langchain_ollama import ChatOllama
+        st.session_state.memory = create_memory(
+            memory_type,
+            ChatOllama(model=llm_model, temperature=temperature),
+        )
+        st.session_state.memory_type = memory_type
+        st.session_state.messages = []
+        st.session_state.last_retrieved_chunks = []
 
-    def format_docs(docs):
-        return "\n\n".join(d.page_content for d in docs)
+    if st.session_state.memory is None:
+        from langchain_ollama import ChatOllama
+        st.session_state.memory = create_memory(
+            memory_type, ChatOllama(model=llm_model, temperature=temperature)
+        )
+        st.session_state.memory_type = memory_type
 
-    chain = (
-        {
-            "context":  RunnableLambda(lambda x: x["question"]) | retriever | RunnableLambda(format_docs),
-            "question": RunnableLambda(lambda x: x["question"]),
-        }
-        | prompt | llm | StrOutputParser()
-    )
-    return chain, vectorstore, retriever
+    if st.session_state.rag_config != rag_config or st.session_state.qa is None:
+        qa, vs, retriever = build_conversational_chain(
+            llm_model, top_k, temperature, memory_type, st.session_state.memory
+        )
+        st.session_state.qa = qa
+        st.session_state.vectorstore = vs
+        st.session_state.retriever = retriever
+        st.session_state.rag_config = rag_config
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -402,33 +491,55 @@ Respuesta en español:""")
 with st.sidebar:
     st.markdown("### ⚙️ Configuración")
 
-    emb_model   = EMB_MODEL  # Fijo: nomic-embed-text:latest
-    llm_model   = st.selectbox("Modelo LLM", LLM_MODELS)
-    top_k       = st.slider("Chunks (k)", 1, 10, 5)
+    emb_model = EMB_MODEL  # Fijo: nomic-embed-text:latest
+    llm_model = st.selectbox("Modelo LLM", LLM_MODELS)
+    memory_label = st.selectbox(
+        "Tipo de memoria",
+        list(MEMORY_OPTIONS.keys()),
+        index=list(MEMORY_OPTIONS.keys()).index(DEFAULT_MEMORY_LABEL),
+        help="Ventana (k=4) es la opción del notebook 03_rag_memory. "
+        "Buffer guarda todo; Resumen comprime el historial con el LLM.",
+    )
+    top_k = st.slider("Chunks (k)", 1, 10, 4)
     temperature = st.slider("Temperatura", 0.0, 1.0, 0.0, 0.05)
-    show_src    = st.toggle("Mostrar fuentes", value=True)
+    show_src = st.toggle("Mostrar fuentes", value=True)
+
+    st.markdown(
+        '<div class="sidebar-section">'
+        "<strong>Índice:</strong> <code>vector_db_2</code><br/>"
+        "<strong>Colección:</strong> mundiales_football"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("---")
 
     if st.button("🗑️ Nueva conversación", use_container_width=True, key="clear-btn"):
         st.session_state.messages = []
         st.session_state.last_retrieved_chunks = []
+        if st.session_state.memory is not None:
+            st.session_state.memory.clear()
         st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# INICIALIZAR RAG (una sola vez por sesión)
+# INICIALIZAR RAG + MEMORIA
 # ══════════════════════════════════════════════════════════════════════════════
-if st.session_state.chain is None or st.session_state.retriever is None:
-    with st.spinner("⚙️ Inicializando el sistema RAG…"):
-        try:
-            chain, vs, retriever = build_rag_chain(emb_model, llm_model, top_k, temperature)
-            st.session_state.chain       = chain
-            st.session_state.vectorstore = vs
-            st.session_state.retriever   = retriever
-        except Exception as e:
-            st.error(f"❌ Error al inicializar el sistema RAG:\n\n{e}")
-            st.stop()
+_rag_config = (llm_model, top_k, temperature, MEMORY_OPTIONS[memory_label])
+_needs_rag_init = (
+    st.session_state.qa is None
+    or st.session_state.rag_config != _rag_config
+    or st.session_state.memory_type != MEMORY_OPTIONS[memory_label]
+)
+try:
+    if _needs_rag_init:
+        with st.spinner("⚙️ Inicializando el sistema RAG…"):
+            ensure_rag_session(llm_model, top_k, temperature, memory_label)
+    else:
+        ensure_rag_session(llm_model, top_k, temperature, memory_label)
+except Exception as e:
+    st.error(f"❌ Error al inicializar el sistema RAG:\n\n{e}")
+    st.stop()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -436,10 +547,10 @@ if st.session_state.chain is None or st.session_state.retriever is None:
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <div class="app-header">
-  <div class="header-avatar">💬</div>
+  <div class="header-avatar">⚽</div>
   <div class="header-text">
-    <h1>RAG Assistant</h1>
-    <p><span class="status-dot"></span>En línea</p>
+    <h1>RAG Assistant · Mundiales</h1>
+    <p><span class="status-dot"></span>En línea · Historia de los Mundiales (1930–2010)</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -452,10 +563,10 @@ def render_messages():
     if not st.session_state.messages:
         st.markdown("""
         <div class="welcome-msg">
-          <div class="icon">🤖</div>
-          <h3>¡Hola! Soy tu asistente RAG</h3>
-          <p>Puedo responder preguntas sobre los papers de ML e IA indexados.<br/>
-          Usa los accesos rápidos de abajo o escribe tu pregunta directamente.</p>
+          <div class="icon">⚽</div>
+          <h3>¡Hola! Soy tu asistente sobre los Mundiales</h3>
+          <p>Pregúntame sobre la historia del Mundial de Fútbol (1930–2010).<br/>
+          Recuerdo el contexto del chat según el tipo de memoria elegido en el panel lateral.</p>
         </div>
         """, unsafe_allow_html=True)
         return
@@ -518,7 +629,7 @@ with col_in:
     user_input = st.text_input(
         "Pregunta",
         value=pending,
-        placeholder="Escribe tu pregunta sobre los papers…",
+        placeholder="Escribe tu pregunta sobre los Mundiales…",
         label_visibility="collapsed",
         key="chat_input",
     )
@@ -538,13 +649,23 @@ if send and user_input.strip():
 
     with st.spinner("Pensando…"):
         try:
-            st.session_state.last_retrieved_chunks = fetch_retrieved_chunks(
-                st.session_state.vectorstore,
-                st.session_state.retriever,
-                q,
-                top_k,
-            )
-            answer = st.session_state.chain.invoke({"question": q})
+            from langchain_core._api.deprecation import suppress_langchain_deprecation_warning
+
+            with suppress_langchain_deprecation_warning():
+                out = st.session_state.qa.invoke({"question": q})
+            answer = out["answer"]
+            source_docs = out.get("source_documents") or []
+            if source_docs:
+                st.session_state.last_retrieved_chunks = [
+                    _chunk_dict(doc) for doc in source_docs
+                ]
+            else:
+                st.session_state.last_retrieved_chunks = fetch_retrieved_chunks(
+                    st.session_state.vectorstore,
+                    st.session_state.retriever,
+                    q,
+                    top_k,
+                )
         except Exception as e:
             st.session_state.last_retrieved_chunks = []
             err = str(e)

@@ -117,6 +117,8 @@ Thumbs.db
 # Vector databases data paths (if saved locally)
 data/vector_db/*
 !data/vector_db/README.md
+data/vector_db_2/*
+!data/vector_db_2/README.md
 
 # Large models or dataset weights
 *.bin
