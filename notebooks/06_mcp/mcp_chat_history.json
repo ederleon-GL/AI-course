@@ -1,0 +1,26 @@
+[
+  {
+    "role": "user",
+    "content": "Hola"
+  },
+  {
+    "role": "assistant",
+    "content": "¡Hola! ¿Cómo puedo ayudarte hoy? Si tienes preguntas sobre el MCP (Model Context Protocol) o cualquier otro tema, no dudes en preguntar."
+  },
+  {
+    "role": "user",
+    "content": "Hola"
+  },
+  {
+    "role": "assistant",
+    "content": "Puedo ayudarte con preguntas de clima."
+  },
+  {
+    "role": "user",
+    "content": "que información tienes?"
+  },
+  {
+    "role": "assistant",
+    "content": "Puedo ayudarte con preguntas de clima."
+  }
+]
