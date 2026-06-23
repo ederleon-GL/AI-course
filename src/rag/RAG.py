@@ -12,7 +12,8 @@ from src.logs import get_logger, short_text
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text:latest"
 DEFAULT_LLM_MODEL = "llama3.2:3b"
 DEFAULT_COLLECTION = "mundiales_football"
-DEFAULT_TOP_K = 4
+DEFAULT_TOP_K = 10 #4
+UMBRAL=0.6
 logger = get_logger("worldcup_rag")
 
 
@@ -76,8 +77,13 @@ def consumir_rag_mundiales(
         collection_name,
         embedding_model,
     )
+    docs_and_scores = vectorstore.similarity_search_with_score(pregunta, k=top_k) #DEVUELVE SCORES TMB
+    docs = [doc for doc, score in docs_and_scores if score >= UMBRAL] #filtra por umbral, si la similitud es menor a UMBRAL, no se incluye
+    
     retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
-    docs = retriever.invoke(pregunta)
+    ##docs = retriever.invoke(pregunta)
+
+    
 
     contexto = "\n\n".join(doc.page_content for doc in docs)
     if not contexto.strip():

@@ -3,14 +3,62 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+import os
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from typing_extensions import TypedDict
+import google.api_core.exceptions as google_exceptions
 
 from src.logs import get_logger, short_text
 from src.rag.RAG import consumir_rag_mundiales
 from src.tools.tools import get_worldcup_tools
 from src.utils.moderador import is_inappropriate_input
+
+'''
+def obtener_llm(temperature: float = 0):
+    # Instancia fallback local (Ollama)
+    ollama_llm = ChatOllama(model="llama3.2:3b", temperature=temperature)
+    
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if api_key:
+        # Instancia Gemini
+        gemini_llm = ChatGoogleGenerativeAI(
+            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            temperature=temperature
+        )
+        # Configura fallback Ollama si falla Gemini
+        return gemini_llm.with_fallbacks([ollama_llm])
+    
+    # Si no hay API key, usa Ollama directamente
+    return ollama_llm
+'''
+
+def obtener_llm(temperature: float = 0):
+    ollama_llm = ChatOllama(model="llama3.2:3b", temperature=temperature)
+
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if api_key:
+        try:
+            gemini_llm = ChatGoogleGenerativeAI(
+                model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+                temperature=temperature
+            )
+            return gemini_llm.with_fallbacks([ollama_llm])
+
+        except google_exceptions.Unauthorized as e:
+            logger.warning("API Key inválida o sin permisos: %s", e)
+        except google_exceptions.ResourceExhausted as e:
+            logger.warning("API Key válida pero sin créditos/cuota: %s", e)
+        except Exception as e:
+            logger.warning("Error inesperado inicializando Gemini: %s", e)
+
+        logger.info("Usando Ollama como fallback.")
+        return ollama_llm
+
+    logger.info("No se encontró GOOGLE_API_KEY, usando Ollama.")
+    return ollama_llm
+
 
 try:
     from langgraph.graph import END, START, StateGraph
@@ -63,17 +111,20 @@ def _execute_tool(tool_obj, args: dict):
 
 @lru_cache(maxsize=2)
 def _router_llm(model_name: str):
-    return ChatOllama(model=model_name, temperature=0)
+    #return ChatOllama(model=model_name, temperature=0)
+    return obtener_llm(0)
 
 
 @lru_cache(maxsize=2)
 def _tools_llm(model_name: str):
-    return ChatOllama(model=model_name, temperature=0)
+    #return ChatOllama(model=model_name, temperature=0)
+    return obtener_llm(0)
 
 
 @lru_cache(maxsize=2)
 def _chat_llm(model_name: str):
-    return ChatOllama(model=model_name, temperature=0.2)
+    #return ChatOllama(model=model_name, temperature=0.2)
+    return obtener_llm(0.2)
 
 
 @lru_cache(maxsize=1)

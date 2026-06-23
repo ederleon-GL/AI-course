@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
+import matplotlib.pyplot as plt
 
 
 def _project_root() -> Path:
@@ -85,6 +86,32 @@ def avg_goals_by_stage(stage_keyword: str, csv_path: str | None = None) -> str:
 
     return f"Promedio de goles en '{keyword}': {data['TotalGoals'].mean():.2f}"
 
+def generar_grafica_goles_por_anio(csv_path: str | None = None) -> str:
+    """
+    Genera una gráfica de barras de la cantidad total de goles por año en los mundiales
+    y la guarda en la carpeta 'outputs'.
+    """
+    df = load_worldcup_matches(csv_path)
+    
+    goles_por_anio = df.groupby("Year")["TotalGoals"].sum().reset_index()
+    
+    plt.figure(figsize=(10, 5))
+    plt.bar(goles_por_anio["Year"], goles_por_anio["TotalGoals"], color="skyblue", edgecolor="black")
+    plt.title("Goles Totales por Año en los Mundiales")
+    plt.xlabel("Año")
+    plt.ylabel("Goles")
+    plt.grid(axis="y", linestyle="--", alpha=0.7)
+    
+    output_dir = _project_root() / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / "goles_por_anio.png"
+    
+    plt.savefig(output_file, bbox_inches="tight")
+    plt.close()
+    
+    return f"Ya generé la gráfica y la guardé en la carpeta: {output_file.as_posix()}"
+
+
 
 def get_worldcup_tools():
     """
@@ -112,4 +139,9 @@ def get_worldcup_tools():
         """Promedio de goles para etapas que contienen una palabra clave."""
         return avg_goals_by_stage(stage_keyword)
 
-    return [matches_by_year_tool, top_attendance_tool, avg_goals_by_stage_tool]
+    @tool
+    def generar_grafica_goles_por_anio_tool() -> str:
+        """Genera una gráfica de barras de goles totales por año y la guarda en la carpeta 'outputs'."""
+        return generar_grafica_goles_por_anio()
+
+    return [matches_by_year_tool, top_attendance_tool, avg_goals_by_stage_tool, generar_grafica_goles_por_anio_tool]
