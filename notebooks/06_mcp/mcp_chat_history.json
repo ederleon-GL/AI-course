@@ -22,5 +22,37 @@
   {
     "role": "assistant",
     "content": "Puedo ayudarte con preguntas de clima."
+  },
+  {
+    "role": "user",
+    "content": "Hola"
+  },
+  {
+    "role": "assistant",
+    "content": "Puedo ayudarte con preguntas de clima."
+  },
+  {
+    "role": "user",
+    "content": "si"
+  },
+  {
+    "role": "assistant",
+    "content": "Puedo ayudarte con preguntas de clima."
+  },
+  {
+    "role": "user",
+    "content": "tienes el clima de bogotá?"
+  },
+  {
+    "role": "assistant",
+    "content": "Puedo consultar clima, pero necesito que indiques una ciudad."
+  },
+  {
+    "role": "user",
+    "content": "Bogotá"
+  },
+  {
+    "role": "assistant",
+    "content": "Puedo ayudarte con preguntas de clima."
   }
 ]
