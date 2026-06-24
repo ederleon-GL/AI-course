@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import warnings
 import datetime
+import html
 
 # Evitar que transformers/sentence-transformers exijan PyTorch (usamos Ollama)
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
@@ -699,7 +700,8 @@ def render_messages():
     html = '<div class="chat-wrapper">'
     for msg in st.session_state.messages:
         role    = msg["role"]
-        content = msg["content"].replace("\n", "<br/>")
+        # Escape model/user text to avoid breaking the custom HTML layout.
+        content = html.escape(str(msg["content"])).replace("\n", "<br/>")
         ts      = msg.get("ts", "")
         if role == "user":
             html += f"""
