@@ -1,0 +1,12 @@
+# Ignorar el entorno virtual de Python
+.venv/
+venv/
+__pycache__/
+
+# Ignorar la carpeta de datos locales (ya la estás vinculando por volumen, no la dupliques en la imagen)
+data/
+
+# Ignorar control de versiones y configuraciones locales
+.git/
+.env
+.gitignore
